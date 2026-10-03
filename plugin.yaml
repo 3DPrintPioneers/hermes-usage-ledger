@@ -1,0 +1,9 @@
+name: usage-ledger
+version: 0.4.3
+requires_hermes: ">=0.21.5"
+description: Local-only, content-free usage tally and observed-request ledger for Hermes Desktop.
+provides_hooks:
+  - pre_llm_call
+  - post_api_request
+  - post_llm_call
+  - on_session_finalize

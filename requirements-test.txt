@@ -1,0 +1,9 @@
+# Test-only dependencies. The plugin declares no extra runtime packages.
+# Install the separately pinned Hermes checkout in editable mode first.
+fastapi==0.142.2
+ruamel.yaml==0.19.1
+python-dotenv==1.2.4
+PyYAML==6.0.3
+rich==15.0.0
+packaging==26.3
+requests==2.34.2
