@@ -2,7 +2,7 @@
   "name": "usage-ledger",
   "label": "Usage Ledger",
   "description": "Local-only observed usage and numeric tally API.",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "tab": { "hidden": true },
   "entry": "dist/hidden.js",
   "api": "plugin_api.py"

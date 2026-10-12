@@ -86,6 +86,57 @@ async function loadPlugin(queryRefetches = null) {
   return module.namespace
 }
 
+test('uses the public plugin command when REST routes await a backend restart', async () => {
+  const plugin = await loadPlugin()
+  const requests=[]
+  for (const message of ['HTTP 404', '404: {"detail":"Not Found"}', "Error invoking remote method 'hermes:api': Error: 404: Not Found"]) {
+    const read=async () => { throw new Error(message) }
+    const request=async (method,params) => { requests.push([method,plain(params)]); return {type:'plugin',output:JSON.stringify({current:{input_tokens:12}})} }
+    assert.deepEqual(plain(await plugin.pluginEndpoint(read,request,'/tally')),{current:{input_tokens:12}})
+  }
+  const read=async () => { throw new Error('HTTP 404') }
+  const request=async () => { throw new Error('must not dispatch unconfirmed clear') }
+  assert.equal(requests[0][0],'command.dispatch')
+  assert.equal(requests[0][1].name,'usage-ledger')
+  assert.deepEqual(JSON.parse(requests[0][1].arg),{action:'tally'})
+  await assert.rejects(()=>plugin.pluginEndpoint(read,request,'/clear',{method:'POST',body:{confirm:false}}),/confirmation/)
+  assert.equal(requests.length,3)
+})
+
+test('rejects non-404 auth and network errors without dispatching commands', async () => {
+  const plugin = await loadPlugin()
+  for (const message of ['HTTP 401: API key not found', 'HTTP 403: resource not found', 'Network error: host not found', 'HTTP 500: upstream 404', '4040', 'not found']) {
+    let dispatched = false
+    const failure = new Error(message)
+    await assert.rejects(() => plugin.pluginEndpoint(async () => { throw failure }, async () => {
+      dispatched = true
+      return { type: 'plugin', output: '{}' }
+    }, '/tally'), error => error === failure)
+    assert.equal(dispatched, false, message)
+  }
+})
+
+test('confirmed clear fallback verifies the emptied summary', async () => {
+  const plugin = await loadPlugin()
+  const actions = []
+  const rest = async () => { throw new Error('404: {"detail":"Not Found"}') }
+  const request = async (_method, params) => {
+    const body = JSON.parse(params.arg)
+    actions.push(body)
+    return { type: 'plugin', output: JSON.stringify(body.action === 'clear' ? { cleared: true, scope: 'observed-request-ledger' } : { observed_requests: 0 }) }
+  }
+  await plugin.clearObservedLedger((path, options) => plugin.pluginEndpoint(rest, request, path, options))
+  assert.deepEqual(actions, [{ action: 'clear', confirm: true }, { action: 'summary' }])
+})
+
+test('prefers existing REST routes and never invokes command fallback on success', async () => {
+  const plugin=await loadPlugin()
+  let fallbackCalls=0
+  const result=await plugin.pluginEndpoint(async()=>({status:'ok'}),async()=>{fallbackCalls++;return {}},'/diagnostics')
+  assert.deepEqual(plain(result),{status:'ok'})
+  assert.equal(fallbackCalls,0)
+})
+
 test('marks incomplete cumulative working time without changing current duration', async () => {
   const plugin = await loadPlugin()
   const view = plugin.toTallyView({

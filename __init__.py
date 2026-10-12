@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import re
 import threading
 from functools import wraps
@@ -25,6 +26,7 @@ _LABEL = re.compile(r"[A-Za-z0-9._/:@+-]{1,128}")
 _ledger: UsageLedger | None = None
 _tally_writer: TallyWriter | None = None
 _resource_lock = threading.RLock()
+_finalize_tally = True
 
 
 def _resources_locked(method):
@@ -100,6 +102,8 @@ def record_turn_started(**payload: Any) -> None:
     """Stage only an opaque turn reference and a local start timestamp."""
     turn_id = _identifier(payload.get("turn_id"))
     payload.clear()
+    if not _finalize_tally:
+        return None
     try:
         _get_tally_writer().record_turn_started(turn_id)
     except Exception:
@@ -131,6 +135,8 @@ def record_observed_request(**payload: Any) -> None:
     except Exception:
         # The observed ledger must not suppress independent tally staging.
         pass
+    if not _finalize_tally:
+        return None
     try:
         _get_tally_writer().stage_request(
             api_request_id=api_request_id,
@@ -148,6 +154,9 @@ def record_completed_response(**payload: Any) -> None:
     turn_id = _identifier(payload.get("turn_id"))
     response = payload.get("assistant_response")
     payload.clear()
+    if not _finalize_tally:
+        del response
+        return None
     try:
         _get_tally_writer().complete_turn(turn_id, response)
     except Exception:
@@ -161,6 +170,8 @@ def record_completed_response(**payload: Any) -> None:
 def recover_pending_tally(**payload: Any) -> None:
     """Retry a content-free pending tally projection at finalization boundaries."""
     payload.clear()
+    if not _finalize_tally:
+        return None
     try:
         _get_tally_writer().recover()
     except Exception:
@@ -180,9 +191,40 @@ def _close_resources() -> None:
     _tally_writer = None
 
 
+def _read_numeric_endpoint(action: str, confirm: bool = False) -> dict[str, Any]:
+    from .dashboard import plugin_api
+
+    if action == "clear":
+        return plugin_api.clear({"confirm": confirm})
+    return {"tally": plugin_api.tally, "diagnostics": plugin_api.diagnostics,
+            "summary": plugin_api.summary}[action]()
+
+
+def numeric_command(raw_args: str) -> str:
+    """Public SDK command fallback for a backend whose REST table is already mounted."""
+    try:
+        body = json.loads(raw_args)
+        if not isinstance(body, dict) or body.get("action") not in {"tally", "diagnostics", "summary", "clear"}:
+            return json.dumps({"error": "unknown numeric action"})
+        action = body["action"]
+        confirm = body.get("confirm") is True
+        body.clear()
+        if action == "clear" and not confirm:
+            return json.dumps({"error": "explicit confirmation required"})
+        return json.dumps(_read_numeric_endpoint(action, confirm))
+    except Exception:
+        return json.dumps({"error": "numeric endpoint unavailable"})
+
+
 def register(ctx: Any) -> None:
+    global _finalize_tally
+    get_config = getattr(ctx, "get_config", None)
+    _finalize_tally = get_config("finalize_tally", True) is not False if callable(get_config) else True
     ctx.register_hook("pre_llm_call", record_turn_started)
     ctx.register_hook("post_api_request", record_observed_request)
     ctx.register_hook("post_llm_call", record_completed_response)
     ctx.register_hook("on_session_finalize", recover_pending_tally)
     ctx.on_unload(_close_resources)
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command("usage-ledger", numeric_command, "Read local numeric usage; clear requires explicit confirmation.")

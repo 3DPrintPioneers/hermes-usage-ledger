@@ -225,6 +225,9 @@ class TallyWriter:
                 "CREATE TABLE IF NOT EXISTS tally_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS projection_sources (source TEXT PRIMARY KEY)"
+            )
+            self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS turn_starts (
                     turn_ref TEXT PRIMARY KEY,
@@ -264,12 +267,14 @@ class TallyWriter:
                 self._set_meta("schema_version", "2")
             if self._meta("identity_key") is None:
                 self._set_meta("identity_key", secrets.token_hex(32))
-            if self._meta("baseline") is None:
+            new_baseline = self._meta("baseline") is None
+            if new_baseline:
                 self._set_meta("baseline", json.dumps(self._read_baseline(), sort_keys=True))
             if self._meta("baseline_sequence") is None:
                 self._set_meta("baseline_sequence", "0")
             if self._meta("observed_sum_fields") is None:
                 self._set_meta("observed_sum_fields", "[]")
+            self._initialize_projection_source(new_baseline)
             observed_fields = self._observed_sum_fields()
             if "working_seconds" not in observed_fields:
                 self._set_meta("observed_sum_fields", json.dumps(sorted(observed_fields | {"working_seconds"})))
@@ -278,7 +283,13 @@ class TallyWriter:
                     "UPDATE completed_turns SET status = 'pending' "
                     "WHERE sequence = (SELECT MAX(sequence) FROM completed_turns)"
                 )
-        self.recover()
+        try:
+            self.recover()
+        except OSError:
+            # The initialized numeric journal remains usable while its file
+            # projection is unavailable. Ownership was validated above and
+            # every later projection still checks the same source guard.
+            pass
 
     @_locked
     def record_turn_started(self, turn_id: object, *, started_at: object = None) -> bool:
@@ -287,6 +298,8 @@ class TallyWriter:
         if turn_ref is None or started is None:
             return False
         with self.connection:
+            if not self._prepare_journal_mutation():
+                return False
             result = self.connection.execute(
                 "INSERT OR IGNORE INTO turn_starts (turn_ref, started_at) VALUES (?, ?)",
                 (turn_ref, started),
@@ -312,6 +325,8 @@ class TallyWriter:
         if duration is not None and duration < 0:
             duration = None
         with self.connection:
+            if not self._prepare_journal_mutation():
+                return False
             result = self.connection.execute(
                 """
                 INSERT OR IGNORE INTO staged_requests (
@@ -347,6 +362,8 @@ class TallyWriter:
         measured = measure_response_text(response)
         commit_ref = self._commit_ref(turn_ref)
         with self.connection:
+            if not self._prepare_journal_mutation():
+                return False
             result = self.connection.execute(
                 """
                 INSERT OR IGNORE INTO completed_turns (
@@ -422,19 +439,36 @@ class TallyWriter:
                 "thinking_unavailable": _nonnegative_int(
                     fields.get(_COUNT_LABELS["thinking_unavailable"])
                 ),
-                "working_unavailable": _nonnegative_int(
-                    fields.get(_COUNT_LABELS["working_unavailable"])
-                ),
+                "working_unavailable": _nonnegative_int(snapshot["working_time_missing_responses"]),
             }
             self._set_meta("baseline", json.dumps(next_baseline, sort_keys=True))
             self._set_meta("baseline_sequence", str(int(rows[-1][0])))
             self._set_meta("observed_sum_fields", json.dumps((*_PROVIDER_RUNNING_FIELDS, "working_seconds")))
             self._set_meta("provider_reseeded_at", str(time.time()))
             self._set_meta("provider_reseed_pending", "1")
+            self._set_meta("projection_source", json.dumps(self._source_values(tally_text), sort_keys=True))
         try:
             self._materialize_serialized()
         except OSError:
             return False
+        return True
+
+    def _prepare_journal_mutation(self) -> bool:
+        # Preserve numeric provenance BEFORE a mutation changes a pending
+        # aggregate. A crash may have already written that projection; its
+        # identity must survive new events even if the file cannot be rewritten
+        # or read. No filesystem operation is a prerequisite for journaling.
+        self.connection.execute("BEGIN IMMEDIATE")
+        pending = self.connection.execute(
+            "SELECT 1 FROM completed_turns WHERE status = 'pending' LIMIT 1"
+        ).fetchone()
+        if pending is not None or self._meta("provider_reseed_pending") == "1":
+            rows = self._completed_rows()
+            if rows:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO projection_sources (source) VALUES (?)",
+                    (json.dumps(self._projected_source_values(rows), sort_keys=True),),
+                )
         return True
 
     def _materialize_serialized(self) -> None:
@@ -467,11 +501,66 @@ class TallyWriter:
             self._observed_sum_fields(),
         )
         contents = self._render(current_row, current, running, baseline)
+        self._check_projection_source(self._source_values(contents))
         self._atomic_replace(contents)
+        self._set_meta("projection_source", json.dumps(self._source_values(contents), sort_keys=True))
         self._mark_pending_applied()
+
+    @staticmethod
+    def _source_values(text: str) -> dict[str, Any]:
+        snapshot = parse_tally_snapshot(text)
+        return {"running": snapshot["running"],
+                "working_unavailable": _nonnegative_int(snapshot["working_time_missing_responses"])}
+
+    def _file_source_values(self) -> dict[str, Any]:
+        try:
+            text = self.tally_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        return self._source_values(text)
+
+    def _projected_source_values(self, rows: list[tuple[Any, ...]]) -> dict[str, Any]:
+        baseline = json.loads(self._meta("baseline") or "{}")
+        sequence = self._baseline_sequence()
+        return {"running": self._running_metrics(rows, baseline, sequence, self._observed_sum_fields()),
+                "working_unavailable": _nonnegative_int(baseline.get("working_unavailable")) + sum(
+                    self._current_metrics(row)["working_seconds"] is None
+                    for row in rows if int(row[0]) > sequence)}
+
+    def _initialize_projection_source(self, new_baseline: bool) -> None:
+        actual = self._file_source_values()
+        rows = self._completed_rows()
+        if self._meta("projection_source") is None:
+            # Bootstrap older databases only from a matching numeric projection,
+            # never treat an externally changed tally as our previous output.
+            if not new_baseline and self.tally_path.exists():
+                applied = {row[0] for row in self.connection.execute(
+                    "SELECT sequence FROM completed_turns WHERE status = 'applied'")}
+                candidates = [self._projected_source_values(rows), *self._pending_source_values()]
+                if applied:
+                    candidates.append(self._projected_source_values([row for row in rows if row[0] in applied]))
+                else:
+                    baseline = json.loads(self._meta("baseline") or "{}")
+                    candidates.append({"running": baseline.get("running", {}),
+                                       "working_unavailable": _nonnegative_int(baseline.get("working_unavailable"))})
+                if actual not in candidates:
+                    raise OSError("tally ownership changed; explicit baseline reconciliation required")
+            self._set_meta("projection_source", json.dumps(actual, sort_keys=True))
+        self._check_projection_source(self._projected_source_values(rows) if rows else None)
+
+    def _check_projection_source(self, proposed: dict[str, Any] | None) -> None:
+        if not self.tally_path.exists():
+            return  # A missing projection can be recovered from durable numeric state.
+        expected = json.loads(self._meta("projection_source") or "null")
+        if self._file_source_values() not in (expected, proposed, *self._pending_source_values()):
+            raise OSError("tally ownership changed; explicit baseline reconciliation required")
+
+    def _pending_source_values(self) -> list[dict[str, Any]]:
+        return [json.loads(row[0]) for row in self.connection.execute("SELECT source FROM projection_sources")]
 
     def _mark_pending_applied(self) -> None:
         self.connection.execute("UPDATE completed_turns SET status = 'applied' WHERE status = 'pending'")
+        self.connection.execute("DELETE FROM projection_sources")
         if self._meta("provider_reseed_pending") == "1":
             self._set_meta("provider_reseed_pending", "0")
 
@@ -639,7 +728,7 @@ class TallyWriter:
         return {
             "running": snapshot["running"],
             "thinking_unavailable": _nonnegative_int(fields.get(_COUNT_LABELS["thinking_unavailable"])),
-            "working_unavailable": _nonnegative_int(fields.get(_COUNT_LABELS["working_unavailable"])),
+            "working_unavailable": _nonnegative_int(snapshot["working_time_missing_responses"]),
         }
 
     def _completed_rows(self) -> list[tuple[Any, ...]]:

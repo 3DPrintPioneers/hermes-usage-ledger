@@ -1,9 +1,17 @@
 name: usage-ledger
-version: 0.4.3
+version: 0.4.4
 requires_hermes: ">=0.21.5"
 description: Local-only, content-free usage tally and observed-request ledger for Hermes Desktop.
+provides_commands:
+  - usage-ledger
 provides_hooks:
   - pre_llm_call
   - post_api_request
   - post_llm_call
   - on_session_finalize
+config_schema:
+  finalize_tally:
+    type: boolean
+    default: true
+    label: Automatically finalize tally.md
+    description: Turn off when another profile-global usage updater owns tally.md. Numeric request observations and the Desktop readout remain enabled.

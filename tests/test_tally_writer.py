@@ -36,6 +36,25 @@ class ResponseMeasurementTests(unittest.TestCase):
 
 
 class TallyWriterTests(unittest.TestCase):
+    def test_legacy_root_baseline_preserves_missing_work_count(self):
+        from contextlib import closing
+        from tally_snapshot import read_tally_snapshot
+        from tally_writer import TallyWriter
+
+        with tempfile.TemporaryDirectory() as directory, closing(sqlite3.connect(':memory:')) as db:
+            tally = Path(directory) / 'tally.md'
+            tally.write_text('# Hermes global usage tally\nUpdated: legacy\nWords Running tally: 40.\n'
+                             'Working Time Running tally: 30.5 seconds measured / 2 unavailable.\n'
+                             '\n## History\nWorking Time Unavailable Responses: 999\n', encoding='utf-8')
+            writer = TallyWriter(db, tally)
+            writer.migrate()
+            writer.record_turn_started('fixture-legacy', started_at=10)
+            writer.complete_turn('fixture-legacy', 'one', ended_at=13)
+            snapshot = read_tally_snapshot(tally)
+            self.assertEqual(snapshot['running']['working_seconds'], 33.5)
+            self.assertEqual(snapshot['working_time_missing_responses'], 2)
+            self.assertIn('incomplete', tally.read_text(encoding='utf-8'))
+
     def test_missing_working_durations_preserve_known_baseline_and_future_additions(self):
         import json
         from contextlib import closing

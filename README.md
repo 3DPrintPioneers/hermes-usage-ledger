@@ -2,7 +2,22 @@
 
 A local Hermes Desktop plugin that adds one **Usage** control to the existing left status-bar group. The popover reads structured values from the active profile’s `tally.md`; it does not add a sidebar, widget, or second status bar.
 
-## Windows beta 0.4.3
+## Windows and macOS beta 0.4.4
+
+Native Hermes Desktop has been exercised on macOS 14.3.1 / Apple Silicon,
+in addition to the existing Windows beta validation. Intel Mac native UI
+coverage is not established. Release notes link the exact commit's fresh
+Windows/macOS/Linux automated CI results; automated CI is not native UI
+validation. See [macOS setup and support limits](docs/MACOS.md).
+
+The Mac compatibility changes recognize the profile-global legacy tally
+header and token labels, preserve historical sections, expose an opt-out for
+automatic tally finalization when another updater owns the file, and use a
+public numeric plugin command as a fallback when a running backend has not
+yet mounted the plugin's REST routes. The existing Windows layout and default
+automatic finalizer are unchanged.
+
+## Maintainer and requirements
 
 Maintainer: [3DPrintPioneers](https://github.com/3DPrintPioneers). Requires Hermes
 0.21.5 or newer with the Desktop Plugin SDK. The repository is
@@ -15,22 +30,34 @@ example, replace `<release-commit-sha>` with that SHA, not a branch or tag:
 
 ```bash
 hermes plugins install 3DPrintPioneers/hermes-usage-ledger --ref <release-commit-sha>
+```
+
+**Before enabling the Agent half:** if another profile-global updater owns
+`tally.md`, leave Agent disabled and turn **Automatically finalize tally.md**
+off in the plugin settings. Then enable the Agent half:
+
+```bash
 hermes plugins enable usage-ledger
 ```
 
 The unified package has two activation surfaces: enable the Python plugin with
 `hermes plugins enable`, then enable the **Usage Ledger** Desktop renderer in
-Desktop **Settings → Plugins**. A bare `hermes plugins install usage-ledger`
-will work only after the plugin is accepted into the Hermes discovery index or
-catalog.
+Desktop **Capabilities → Plugins**. Catalog-name installs use the previously
+reviewed version until maintainers merge the exact-SHA update PR; publishing
+a GitHub release alone does not update the library.
 
 ## Support status
 
 - Windows: the backend and native Desktop display have been exercised locally.
   Recovery, reopening, and data-retention tests use isolated temporary profiles;
   the active user's app is not restarted or cleared for release validation.
-- macOS/Linux: CI targets automated portability checks; complete live Desktop
-  verification before advertising those platforms.
+- macOS: native Desktop validated on macOS 14.3.1, Apple Silicon/arm64,
+  including isolated installation, popup/preferences/refresh, hot-install
+  command access, fixture accounting, and data retention. Intel Mac native
+  coverage is not established; see [macOS setup](docs/MACOS.md).
+- Windows/macOS/Linux: the release's linked CI checks automated backend and
+  renderer portability. Linux native Desktop is not advertised as supported;
+  CI does not establish native UI coverage on untested hosts/architectures.
 
 ## What the control shows
 
@@ -38,7 +65,7 @@ The popover shows **Current** and **Running** values for input, output, cache-re
 
 - Missing or unsupported values render as `N/A`; an explicit measured `0` remains `0`.
 - The renderer polls its read-only `/tally` endpoint every **30 seconds**; **Refresh now** in the popover refetches the tally and diagnostics immediately.
-- `/tally` reads only labeled numeric fields from the latest `## Current response` block. A later unmanaged section cannot override it.
+- `/tally` reads only labeled numeric fields from the latest `## Current response` block, or the supported legacy root header before history sections. A later unmanaged section cannot override it.
 - `tally.md` remains separate from the observed provider-request ledger. `/summary` never blends those scopes.
 
 ## Statusline selection
@@ -66,6 +93,25 @@ For each normal, successful final response that Hermes emits through `post_llm_c
 
 Hermes’s supported plugin contract requires hook callbacks to accept `**kwargs`. The callbacks immediately copy only an allowlisted primitive subset, clear the payload, and never log, serialize, hash, cache, or persist prompt text, assistant text, tool arguments/results, credentials, raw provider payloads, URLs, headers, or response objects. The final assistant response is held only long enough to calculate numeric text counts.
 
+### Existing external tally writers
+
+If another profile-global updater owns `tally.md`, turn **Automatically finalize
+tally.md** (`finalize_tally`) off in the plugin settings before enabling the
+Agent half. This prevents a competing writer while retaining numeric request
+observations and the readout. The default is true for ordinary installations.
+
+The setting is read at plugin registration. Finish agent turns, quiesce every
+process writing this profile, disable the Agent half, change the setting, then
+re-enable it; do not assume a cached collector changes ownership immediately.
+Never leave automatic and external writers running concurrently.
+
+Re-enabling automatic finalization does **not** authorize a baseline reset.
+If the external writer changed running values or missing-work counts, the
+plugin refuses stale recovery/projection instead of overwriting those totals.
+Keep `finalize_tally` off and arrange an explicitly approved, quiescent baseline
+reconciliation before resuming automatic writes. Pending unprojected rows must
+be audited; deleting the database or file is not a handoff procedure.
+
 ### Availability rules
 
 - Individual provider usage buckets are counted only when every staged request for that finalized turn supplies a positive finite integer. Missing, zero-normalized, malformed, or partial buckets are `N/A`, never synthetic zeroes.
@@ -80,7 +126,7 @@ Hermes’s supported plugin contract requires hook callbacks to accept `**kwargs
 
 ### Upgrade compatibility
 
-**0.4.3 backend upgrades require a quiescent restart.** Finish active agent
+**Upgrades from 0.4.1/0.4.2 to a 0.4.3-or-newer backend require a quiescent restart.** Finish active agent
 turns and stop all older Hermes processes using this profile before the new
 backend or dashboard API loads. Do not migrate the request ledger while cached
 0.4.1/0.4.2 collectors can still write; mixed-version request collectors are not
@@ -99,7 +145,7 @@ durably replays the projection if file replacement fails.
 
 ### Durability and limits
 
-The numeric source of truth is `plugin-data/usage-ledger/tally-state.db`, not incremental edits to `tally.md`. A finalized turn is first committed as a pending SQLite row. The plugin serializes the full projection with `BEGIN IMMEDIATE`, writes and fsyncs a same-directory temporary file, replaces `tally.md` atomically, then marks the row applied. Pending rows replay on the next finalization boundary or restart. Concurrent writer connections cannot leave a torn projection.
+The numeric source of truth is `plugin-data/usage-ledger/tally-state.db`, not incremental edits to `tally.md`. A finalized turn is first committed as a pending SQLite row. Before another journal mutation changes a pending aggregate, the plugin saves its numeric projection provenance under the same SQLite write lock. This lets recovery recognize an already-written older pending projection after a crash without making another successful file replacement a prerequisite for preserving incoming events. The plugin serializes the full projection with `BEGIN IMMEDIATE`, writes and fsyncs a same-directory temporary file, replaces `tally.md` atomically, then marks the rows applied and removes pending provenance checkpoints in the same transaction. File-recovery failure does not disable an initialized, ownership-validated numeric journal; pending rows remain recoverable. External running-total mismatches still block replacement. Concurrent writer connections cannot leave a torn projection.
 
 This is exactly-once for duplicate hook delivery, retries sharing Hermes’s logical API request ID, plugin reloads, late pending writes, and restart recovery. It cannot recover a response if Hermes terminates before it emits the observer hook; it deliberately does **not** scan transcripts, prompts, or provider payloads to backfill such an event.
 

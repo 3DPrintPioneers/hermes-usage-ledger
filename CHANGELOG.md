@@ -2,6 +2,26 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.4.4] - Windows and macOS beta
+
+### Fixed
+
+- Read legacy profile-global numeric tally headers/token labels before history sections, preserving unavailable values and explicit missing-work counts.
+- Derive expanded Activity tokens only from explicitly available Canonical and reasoning totals.
+- Add a `finalize_tally` setting (default true) so installations with another global tally writer can disable automatic finalization without disabling numeric observations or the display.
+- Preserve the reader's normalized missing-work count when adopting a legacy root tally, ignoring conflicting history fields.
+- Refuse stale automatic recovery/projection when another tally owner changed running values or missing-work counts; an explicit baseline reconciliation is required. Store only numeric projection provenance.
+- Preserve numeric pending-projection checkpoints before journal mutations, so crash-after-replace recovery and incoming completions/observations/starts do not depend on successful file rewriting. An unwritable projection does not disable an already-validated numeric journal.
+- Accept finite scientific-notation measurements in the shared numeric reader, rejecting overflow, nonzero underflow, and malformed partial values; preserve exact numeric round-trip compatibility with journal provenance.
+- Add the allowlisted `usage-ledger` numeric command and Desktop SDK fallback for startup-unmounted REST routes; preserve confirmation before destructive clear and do not fall back on authentication/network failures.
+
+### Release scope
+
+- Native macOS validation: macOS 14.3.1, Apple Silicon/arm64. Intel Mac native UI coverage is not established.
+- Existing Windows native layout/default collection behavior is preserved. Fresh cross-platform automated CI is linked in the release notes; it is not native UI evidence for untested hosts.
+- No Hermes core changes, provider test calls, external telemetry, machine-to-machine accounting transfer, or automatic process restart.
+- Existing install-scanner cautions remain disclosed. Catalog metadata/pins change only after a maintainer merges the separately reviewed update PR.
+
 ## [0.4.3] - Windows beta
 
 ### Fixed

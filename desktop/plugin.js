@@ -4,6 +4,7 @@ import {
   Checkbox,
   compactNumber,
   ConfirmDialog,
+  host,
   PALETTE_AREA,
   Popover,
   PopoverContent,
@@ -442,6 +443,33 @@ function UsageStatusItem({ readTally, readDiagnostics = async () => null, clearL
   })
 }
 
+export async function pluginEndpoint(rest, request, path, options) {
+  const actions = new Set(['/tally', '/diagnostics', '/summary', '/clear'])
+  if (!actions.has(path)) throw new Error('unknown numeric endpoint')
+  if (path === '/clear' && (options?.method !== 'POST' || options?.body?.confirm !== true)) {
+    throw new Error('explicit confirmation required')
+  }
+  try {
+    return await rest(path, options)
+  } catch (error) {
+    // Hermes mounts REST routes at startup. Public commands hot-load safely;
+    // use that SDK door only for an unmounted route, not an auth/network error.
+    const message = String(error?.message ?? error)
+    if (!/^(?:Error invoking remote method 'hermes:api': Error: )?(?:HTTP )?404(?:$|:)/.test(message)) throw error
+    const body = { action: path.slice(1) }
+    if (path === '/clear') body.confirm = true
+    const reply = await request('command.dispatch', { name: ID, arg: JSON.stringify(body) })
+    if (reply?.type !== 'plugin' || typeof reply?.output !== 'string') {
+      throw new Error('numeric plugin command unavailable')
+    }
+    const value = JSON.parse(reply.output)
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.error) {
+      throw new Error('numeric plugin command failed')
+    }
+    return value
+  }
+}
+
 export default {
   id: ID,
   name: 'Usage Ledger',
@@ -449,15 +477,16 @@ export default {
   defaultEnabled: false,
   register(ctx) {
     configureStatuslineSelection(ctx.storage)
+    const rest = (path, options) => pluginEndpoint(ctx.rest, host.request, path, options)
     ctx.registerMany([
       {
         id: 'status',
         area: STATUSBAR_AREAS.left,
         order: 100,
         render: () => jsx(UsageStatusItem, {
-          readTally: () => ctx.rest('/tally'),
-          readDiagnostics: () => ctx.rest('/diagnostics'),
-          clearLedger: () => clearObservedLedger(ctx.rest),
+          readTally: () => rest('/tally'),
+          readDiagnostics: () => rest('/diagnostics'),
+          clearLedger: () => clearObservedLedger(rest),
         }),
       },
       {
