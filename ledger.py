@@ -110,10 +110,12 @@ class UsageLedger:
                 self._set_meta("identity_scheme", _IDENTITY_SCHEME)
             self._set_meta("schema_version", "2")
 
+    @_locked
     def _meta(self, key: str) -> str | None:
         row = self.connection.execute("SELECT value FROM ledger_meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
 
+    @_locked
     def _set_meta(self, key: str, value: str) -> None:
         self.connection.execute(
             "INSERT INTO ledger_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
