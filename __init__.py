@@ -184,7 +184,8 @@ def _close_resources() -> None:
     for resource in (_ledger, _tally_writer):
         if resource is not None:
             try:
-                resource.connection.close()
+                with resource._lock:  # FIX: same lock the DB methods use
+                    resource.connection.close()
             except Exception:
                 pass
     _ledger = None

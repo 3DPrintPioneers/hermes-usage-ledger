@@ -765,16 +765,19 @@ class TallyWriter:
             "future observed values add from here without changing this baseline."
         )
 
+    @_locked
     def _meta(self, key: str) -> str | None:
         row = self.connection.execute("SELECT value FROM tally_meta WHERE key = ?", (key,)).fetchone()
         return str(row[0]) if row is not None else None
 
+    @_locked
     def _set_meta(self, key: str, value: str) -> None:
         self.connection.execute(
             "INSERT INTO tally_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
 
+    @_locked
     def _event_ref(self, api_request_id: object) -> str | None:
         if not isinstance(api_request_id, str) or not api_request_id:
             return None
@@ -783,6 +786,7 @@ class TallyWriter:
             return None
         return hmac.new(bytes.fromhex(key), f"event\0{api_request_id}".encode("utf-8"), hashlib.sha256).hexdigest()
 
+    @_locked
     def _turn_ref(self, turn_id: object) -> str | None:
         if not isinstance(turn_id, str) or not turn_id:
             return None
